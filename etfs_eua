@@ -1,0 +1,349 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jan 15 01:43:56 2021
+
+@author: Filipe
+"""
+import os
+import pandas as pd
+import numpy as np 
+import seaborn as sns
+import copy
+import matplotlib.pyplot as plt 
+import plotly.express as px
+sns.set_style('whitegrid')
+plt.style.use("fivethirtyeight")
+%matplotlib inline
+
+from sklearn.preprocessing import StandardScaler 
+from sklearn.decomposition import PCA 
+
+import seaborn as sns
+sns.set_style('whitegrid')
+plt.style.use("fivethirtyeight")
+
+import pandas_datareader.data as web
+
+from datetime import datetime, timedelta
+
+from keras.models import Sequential
+from keras.layers import Activation, Dense
+from keras.layers import LSTM
+from keras.layers import Dropout
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn import preprocessing
+plt.style.use('seaborn')
+sns.set(font_scale=2)
+#%%
+np.random.seed(1)
+
+epochs = 80
+batch_size = 32
+verbose = 2 
+shuffle = False
+window_len = 10
+pred_range = 5
+n_neurons = 50
+split_date = '2017-01-01'
+
+etf_list = ['SPY', 'DIA', 'QQQ']
+
+start = datetime(1999,12,31)
+end = datetime(2020,12,31)
+
+#%%
+try:
+    os.chdir(r'C:\Users\desktop\OneDrive - Fundacao Getulio Vargas - FGV\Pós PUC 2019\TCC\base de dados')
+except:
+    os.chdir(r'D:\Users\Filipe\OneDrive - Fundacao Getulio Vargas - FGV\Pós PUC 2019\TCC\base de dados')
+
+data = pd.read_excel('PUC_MG.xls', index_col = 0, sheet_name = "Daily")
+df = data.fillna(0)
+
+df = df[df.index <= end][df[df.index <= end].index >= start]
+df.head()
+#%%
+
+for etf in etf_list:   
+    globals()[etf] = web.DataReader(etf, 'yahoo', start, end)
+    
+etf_list_2 = [SPY, DIA, QQQ]
+etf_name = ["SPDR S&P 500 Trust ETF", "iShares SPDR Dow Jones", "Invesco NASDAQ"]
+
+for etf, etf_name in zip(etf_list_2, etf_name):
+    etf["etf_name"] = etf_name
+    
+etf_df = pd.concat(etf_list_2, axis=0)
+etf_df.tail(10) 
+
+list_etf_df = [] 
+for group in range(0,len(list(etf_df.groupby("etf_name",as_index = False)))):
+    list_etf_df.append(list(etf_df.groupby("etf_name",as_index = False))[group][1])
+  
+list_etf_df[0]['Adj Close'] = list_etf_df[0]['Adj Close'].pct_change().dropna()*100
+list_etf_df[1]['Adj Close'] = list_etf_df[1]['Adj Close'].pct_change().dropna()*100
+list_etf_df[2]['Adj Close'] = list_etf_df[2]['Adj Close'].pct_change().dropna()*100
+
+list_etf_df[0] = list_etf_df[0].dropna()
+list_etf_df[1] = list_etf_df[1].dropna()
+list_etf_df[2] = list_etf_df[2].dropna()
+
+#%%
+X = df.values 
+sc = StandardScaler() 
+X_std = sc.fit_transform(X)
+
+pca = PCA()
+X_pca = pca.fit(X_std)
+
+#%%
+plt.plot(np.cumsum(pca.explained_variance_ratio_))
+plt.xlabel('number of components')
+plt.ylabel('cumulative explained variance');
+
+#%%
+
+pca = PCA(n_components = 0.90)
+X_pca = pca.fit_transform(X_std) 
+print(pca.n_components_) 
+
+#%%
+n_pcs= pca.n_components_ 
+most_important = [np.abs(pca.components_[i]).argmax() for i in range(n_pcs)]
+initial_feature_names = df.columns
+most_important_names = [initial_feature_names[most_important[i]] for i in range(n_pcs)]
+
+#%%
+
+pca_list = []
+ret_acum = []
+
+for group in range(0,len(list_etf_df)):
+    pca_list.append(pd.merge(list_etf_df[group][['Adj Close','etf_name']],df[most_important_names],left_index = True,right_index = True))        
+    nome_acao = pca_list[group].iloc[0,1]
+    model_data = pca_list[group].sort_index().drop(columns=['etf_name'])
+    training_set, test_set = model_data[model_data.index < split_date], model_data[model_data.index >= split_date]
+    
+    model = None
+    
+    def build_model(inputs, output_size, neurons, activ_func="linear",
+                        dropout=0.25, loss="mean_squared_error", optimizer="adam"):
+            model = Sequential()
+            model.add(LSTM(neurons, input_shape=(inputs.shape[1], inputs.shape[2])))
+            model.add(Dropout(dropout))
+            model.add(Dense(units=output_size))
+            model.add(Activation(activ_func))
+          
+            model.add(Dropout(dropout))
+            model.add(Dense(units=output_size))
+           
+            model.compile(loss=loss, optimizer=optimizer)
+            return model
+
+
+    names_test = test_set.columns
+    names_training = training_set.columns
+
+    scaler_test = StandardScaler()
+    
+    def clean_dataset(df):
+        assert isinstance(df, pd.DataFrame), "df needs to be a pd.DataFrame"
+        df.dropna(inplace=True)
+        indices_to_keep = ~df.isin([np.nan, np.inf, -np.inf]).any(1)
+        return df[indices_to_keep].astype(np.float64)
+
+    scaled_test = (clean_dataset(test_set))
+    scaled_test = scaler_test.fit_transform(scaled_test) 
+    scaled_test = pd.DataFrame(scaled_test, columns=names_test)
+     
+    scaler_train = StandardScaler()
+    
+    scaled_training = (clean_dataset(training_set))
+    scaled_training = scaler_train.fit_transform(scaled_training)
+    scaled_training = pd.DataFrame(scaled_training, columns=names_training)
+
+    training_set_1 = copy.deepcopy(scaled_training)
+    test_set_1 = copy.deepcopy(scaled_test)
+
+    norm_cols = training_set.columns
+
+    LSTM_training_inputs = []
+    for i in range(len(training_set_1)-window_len):
+        temp_set = training_set_1[i:(i+window_len)].copy()
+        for col in norm_cols:
+            temp_set.loc[:, col] = temp_set[col]
+        LSTM_training_inputs.append(temp_set)
+   
+    LSTM_test_inputs = []
+    for i in range(len(test_set_1)-window_len):
+        temp_set = test_set_1[i:(i+window_len)].copy()
+        for col in norm_cols:
+            temp_set.loc[:, col] = temp_set[col]
+        LSTM_test_inputs.append(temp_set)
+    LSTM_test_outputs = (test_set['Adj Close'][window_len:].values)
+
+    LSTM_training_inputs = [np.array(LSTM_training_input) for LSTM_training_input in LSTM_training_inputs]
+    LSTM_training_inputs = np.array(LSTM_training_inputs)
+    LSTM_training_inputs = np.nan_to_num(LSTM_training_inputs)
+
+    LSTM_test_inputs = [np.array(LSTM_test_inputs) for LSTM_test_inputs in LSTM_test_inputs]
+    LSTM_test_inputs = np.array(LSTM_test_inputs)
+    LSTM_test_inputs = np.nan_to_num(LSTM_test_inputs)
+
+    etf_model = build_model(LSTM_training_inputs, output_size=pred_range, neurons = n_neurons)
+
+    LSTM_training_outputs = []
+    for i in range(window_len, len(training_set_1['Adj Close'])-pred_range):
+        LSTM_training_outputs.append(training_set_1['Adj Close'][i:i+pred_range].values)
+    LSTM_training_outputs = np.array(LSTM_training_outputs)
+
+    etf_history = etf_model.fit(LSTM_training_inputs[:-pred_range], LSTM_training_outputs, 
+                            epochs=epochs, batch_size=batch_size, verbose=verbose, shuffle=shuffle)
+
+    etf_pred_prices = (etf_model.predict(LSTM_test_inputs)[:-pred_range][::pred_range])
+   
+    
+    LSTM_test_outputs_2 = pd.DataFrame(np.array(etf_pred_prices).reshape((etf_pred_prices).shape[0]*(etf_pred_prices).shape[1],1))
+
+    maximo = len(LSTM_test_outputs_2) # maximo de linhas da previsão
+    revertendo_scalar = test_set.copy().iloc[:maximo,] # filtrando o arquivo de teste para o mesmo número de linhas do de previsão
+    revertendo_scalar['Adj Close'] = (LSTM_test_outputs_2).values #substituindo a coluna de preços rginais pelo de preços prevista
+    revertendo_scalar_ok = pd.DataFrame(scaler_test.inverse_transform(revertendo_scalar)) #efetuando a reversão 
+    revertendo_scalar_ok.columns = revertendo_scalar.columns.copy() # copiando os nomes das colunas
+    
+      
+    revertendo_scalar_ok = revertendo_scalar_ok.rename({'Adj Close':'MODELO'}, axis = 1 )
+    comparacao_valores = pd.concat(((model_data[model_data.index >= split_date]['Adj Close'].iloc[:maximo].reset_index()),\
+                                   revertendo_scalar_ok['MODELO'].reset_index()),axis = 1)
+    comparacao_valores.columns = ['Date', 'Adj Close', 'index', 'MODELO']
+    comparacao_valores['DIFERENCA'] = comparacao_valores['MODELO']-comparacao_valores['Adj Close']
+    comparacao_valores = comparacao_valores[['Date', 'MODELO','Adj Close','DIFERENCA']]
+    comparacao_valores.to_csv(nome_acao+'.csv', sep = ",", float_format='%.3f')
+   
+    fig, ax1 = plt.subplots(1,1)
+
+    ax1.plot(etf_history.epoch, etf_history.history['loss'])
+    ax1.set_title('Training Error')
+
+    if etf_model.loss == 'mae':
+        ax1.set_ylabel('Mean Absolute Error (MAE)',fontsize=12)
+
+    else:
+        ax1.set_ylabel('Model Loss',fontsize=12)
+    ax1.set_xlabel('# Epochs',fontsize=12)
+    plt.show()
+    
+    
+    comparacao_valores['Date'] = comparacao_valores['Date']+pd.Timedelta("1D")
+  
+    #Comparação Variação Diária Valor Previsto x Real
+    plt.figure(figsize=(25,5))
+    plt.plot(comparacao_valores['Date'].values, comparacao_valores['MODELO'].values, label = "Modelo")
+    plt.plot(comparacao_valores['Date'].values, comparacao_valores['Adj Close'].values, label = "Real")
+    plt.xlabel('Data')
+
+    plt.ylabel('Preço')
+    plt.ylim(top=np.amax(np.array([np.amax(comparacao_valores['MODELO']),np.amax(comparacao_valores['Adj Close'])])))  # adjust the top leaving bottom unchanged
+    plt.ylim(bottom=np.amin(np.array([np.amin(comparacao_valores['MODELO']),np.amin(comparacao_valores['Adj Close'])])))  # adjust the bottom leaving top unchange
+
+    plt.title('LSTM x Dados Reais')
+
+    plt.legend()
+    plt.tight_layout()
+    
+    plt.savefig(nome_acao+" "+str(datetime.now()).replace("-"," ").replace(":"," ")[:-10]+'.png')
+
+    ret_acum.append(pd.merge(comparacao_valores['Date'],pd.merge((comparacao_valores['MODELO']/100+1).cumprod(),(comparacao_valores['Adj Close']/100+1).cumprod(),left_index = True,right_index = True), left_index = True,right_index = True))
+ 
+#%%
+    
+    # Preço Histórico
+
+for i in range(0,len(etf_list_2)):
+    temp_df = etf_list_2[i].reset_index()
+    nome_acao = temp_df.iloc[0,7]
+    fig = px.line(temp_df, x="Date", y="Adj Close", title='Preço de Fechamento Ajustado - '+nome_acao)
+    fig.write_image(nome_acao+" Adj Close.png") 
+#%%
+# Volume Histórico
+
+for i in range(0,len(etf_list_2)):
+    temp_df = etf_list_2[i].reset_index()
+    nome_acao = temp_df.iloc[0,7]
+    fig = px.line(temp_df, x="Date", y="Volume", title='Volume - '+nome_acao)
+    fig.write_image(nome_acao+" Volume.png") 
+    
+#%%
+# Distribuição dos Retornos Diários
+plt.figure(figsize=(12, 12))
+for i in range(0,len(etf_list_2)):
+    nome_acao = etf_list_2[i].iloc[0,6]
+    temp_df = etf_list_2[i].reset_index()
+    temp_df['Daily Return'] = temp_df['Adj Close'].pct_change().dropna().min()
+    plt.subplots_adjust(hspace = 0.8)
+    sns.distplot(temp_df['Daily Return'].dropna(), bins=100, color='purple')
+    plt.ylabel(None)
+    plt.xlabel(None)
+    plt.title(nome_acao+' - Distribuição dos Retornos Diários')
+ 
+#%%
+    #Matriz de Correlação
+corr_df = pd.DataFrame()     
+for i in range(0,len(etf_list_2)):
+    nome_acao = etf_list_2[i].iloc[0,6]
+    corr_df[nome_acao] = etf_list_2[i]['Adj Close'].pct_change().dropna()
+
+sns.heatmap(corr_df.corr(), annot=True,cmap="summer").figure.savefig('Matriz de Correlação.png',bbox_inches='tight')
+plt.close()
+sns.jointplot(corr_df.columns[0], corr_df.columns[1], corr_df, kind='scatter').savefig('CORR DIA e SPY.png',bbox_inches='tight')
+sns.jointplot(corr_df.columns[0], corr_df.columns[2], corr_df, kind='scatter').savefig('CORR QQQ e SPY.png',bbox_inches='tight')
+sns.jointplot(corr_df.columns[2], corr_df.columns[1], corr_df, kind='scatter').savefig('CORR QQQ e DIA.png',bbox_inches='tight')
+
+#%%
+
+# RETORNO ACUMULADO
+((ret_acum[0]['MODELO']-1)*100)
+((ret_acum[0]['Adj Close']-1)*100)
+
+
+#NASDAQ - QQQ
+plt.figure(figsize=(15,5))
+plt.plot(ret_acum[0]['Date'].values, ((ret_acum[0]['MODELO']-1)*100).values, label = "Modelo")
+plt.plot(ret_acum[0]['Date'].values, ((ret_acum[0]['Adj Close']-1)*100).values, label = "Real")
+plt.xlabel('Data')
+
+plt.ylabel('Rentabilidade')
+
+plt.title('LSTM x Dados Reais')
+
+plt.legend()
+plt.tight_layout()
+
+#S&P500 - SPY
+plt.figure(figsize=(15,5))
+plt.plot(ret_acum[1]['Date'].values, ((ret_acum[1]['MODELO']-1)*100).values, label = "Modelo")
+plt.plot(ret_acum[1]['Date'].values, ((ret_acum[1]['Adj Close']-1)*100).values, label = "Real")
+plt.xlabel('Data')
+
+plt.ylabel('Rentabilidade')
+plt.title('LSTM x Dados Reais')
+
+plt.legend()
+plt.tight_layout()
+
+#Dow Jones - DIA
+plt.figure(figsize=(15,5))
+plt.plot(ret_acum[2]['Date'].values, ((ret_acum[2]['MODELO']-1)*100).values, label = "Modelo")
+plt.plot(ret_acum[2]['Date'].values, ((ret_acum[2]['Adj Close']-1)*100).values, label = "Real")
+plt.xlabel('Data')
+
+plt.ylabel('Rentabilidade')
+
+plt.title('LSTM x Dados Reais')
+
+plt.legend()
+plt.tight_layout()
+
+plt.savefig(nome_acao+" "+str(datetime.now()).replace("-"," ").replace(":"," ")[:-10]+'.png')
